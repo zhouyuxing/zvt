@@ -106,7 +106,8 @@ class SimAccountService(AccountService):
                  sell_cost=0.001,
                  slippage=0.001,
                  rich_mode=True,
-                 adjust_type: AdjustType = None):
+                 adjust_type: AdjustType = None,
+                 keep_history=False):
         self.entity_schema = entity_schema
         self.base_capital = base_capital
         self.buy_cost = buy_cost
@@ -120,14 +121,16 @@ class SimAccountService(AccountService):
         self.provider = provider
         self.level = level
         self.start_timestamp = timestamp
+        self.keep_history = keep_history
 
-        self.account: AccountStats = self.init_account()
+        self.account = None
+        self.account = self.init_account()
 
     def input_money(self, money=1000000):
         self.account.input_money += money
         self.account.cash += money
 
-    def init_account(self) -> AccountStats:
+    def clear_account(self):
         trader_info = get_trader_info(session=self.session, trader_name=self.trader_name, return_type='domain',
                                       limit=1)
 
@@ -139,6 +142,15 @@ class SimAccountService(AccountService):
             self.session.query(Order).filter(Order.trader_name == self.trader_name).delete()
             self.session.commit()
 
+    def init_account(self) -> AccountStats:
+        if not self.keep_history:
+            self.clear_account()
+
+        if self.keep_history:
+            self.account = self.load_account()
+            if self.account:
+                return self.account
+
         return AccountStats(entity_id=f'trader_zvt_{self.trader_name}',
                             timestamp=self.start_timestamp,
                             trader_name=self.trader_name,
@@ -146,8 +158,7 @@ class SimAccountService(AccountService):
                             input_money=self.base_capital,
                             all_value=self.base_capital,
                             value=0,
-                            closing=False
-                            )
+                            closing=False)
 
     def load_account(self) -> AccountStats:
         records = AccountStats.query_data(filters=[AccountStats.trader_name == self.trader_name],

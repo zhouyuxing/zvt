@@ -15,7 +15,7 @@ from zvt.domain import Stock, TraderInfo, AccountStats, Position
 from zvt.factors.target_selector import TargetSelector
 from zvt.trader import TradingSignal, TradingSignalType, TradingListener
 from zvt.trader.account import SimAccountService
-from zvt.utils.time_utils import to_pd_timestamp, now_pd_timestamp, to_time_str, is_same_date
+from zvt.utils.time_utils import to_pd_timestamp, now_pd_timestamp, to_time_str, is_same_date, next_date
 
 
 class Trader(object):
@@ -35,7 +35,8 @@ class Trader(object):
                  draw_result: bool = True,
                  rich_mode: bool = False,
                  adjust_type: AdjustType = None,
-                 profit_threshold=(3, -0.3)) -> None:
+                 profit_threshold=(3, -0.3),
+                 keep_history=False) -> None:
         assert self.entity_schema is not None
 
         self.logger = logging.getLogger(__name__)
@@ -82,6 +83,7 @@ class Trader(object):
             adjust_type = AdjustType(adjust_type)
         self.adjust_type = adjust_type
         self.profit_threshold = profit_threshold
+        self.keep_history = keep_history
 
         self.account_service = SimAccountService(entity_schema=self.entity_schema,
                                                  trader_name=self.trader_name,
@@ -89,7 +91,8 @@ class Trader(object):
                                                  provider=self.provider,
                                                  level=self.level,
                                                  rich_mode=rich_mode,
-                                                 adjust_type=self.adjust_type)
+                                                 adjust_type=self.adjust_type,
+                                                 keep_history=keep_history)
 
         self.register_trading_signal_listener(self.account_service)
 
@@ -140,23 +143,27 @@ class Trader(object):
 
         entity_type = self.entity_schema.__name__.lower()
 
-        sim_account = TraderInfo(id=self.trader_name,
-                                 entity_id=f'trader_zvt_{self.trader_name}',
-                                 timestamp=self.start_timestamp,
-                                 trader_name=self.trader_name,
-                                 entity_type=entity_type,
-                                 entity_ids=entity_ids,
-                                 exchanges=exchanges,
-                                 codes=codes,
-                                 start_timestamp=self.start_timestamp,
-                                 end_timestamp=self.end_timestamp,
-                                 provider=self.provider,
-                                 level=self.level.value,
-                                 real_time=self.real_time,
-                                 kdata_use_begin_time=self.kdata_use_begin_time,
-                                 kdata_adjust_type=self.adjust_type.value)
-        self.session.add(sim_account)
-        self.session.commit()
+        # FIXME:
+        records = TraderInfo.query_data(filters=[TraderInfo.trader_name == self.trader_name],
+                                        order=TraderInfo.timestamp.desc(), limit=1, return_type='domain')
+
+        if not self.keep_history or not records:
+            sim_account = TraderInfo(id=self.trader_name,
+                                     entity_id=f'trader_zvt_{self.trader_name}',
+                                     timestamp=self.start_timestamp,
+                                     trader_name=self.trader_name,
+                                     entity_type=entity_type,
+                                     entity_ids=entity_ids,
+                                     exchanges=exchanges,
+                                     codes=codes,
+                                     start_timestamp=self.start_timestamp,
+                                     provider=self.provider,
+                                     level=self.level.value,
+                                     real_time=self.real_time,
+                                     kdata_use_begin_time=self.kdata_use_begin_time,
+                                     kdata_adjust_type=self.adjust_type.value)
+            self.session.add(sim_account)
+            self.session.commit()
 
     def init_selectors(self, entity_ids, entity_schema, exchanges, codes, start_timestamp, end_timestamp,
                        adjust_type=None):
@@ -508,9 +515,32 @@ class StockTrader(Trader):
                  start_timestamp: Union[str, pd.Timestamp] = None, end_timestamp: Union[str, pd.Timestamp] = None,
                  provider: str = None, level: Union[str, IntervalLevel] = IntervalLevel.LEVEL_1DAY,
                  trader_name: str = None, real_time: bool = False, kdata_use_begin_time: bool = False,
-                 draw_result: bool = True, rich_mode: bool = False, adjust_type: AdjustType = AdjustType.hfq) -> None:
+                 draw_result: bool = True, rich_mode: bool = False, adjust_type: AdjustType = AdjustType.hfq,
+                 profit_threshold=(3, -0.3), keep_history=False) -> None:
         super().__init__(entity_ids, exchanges, codes, start_timestamp, end_timestamp, provider, level, trader_name,
-                         real_time, kdata_use_begin_time, draw_result, rich_mode, adjust_type)
+                         real_time, kdata_use_begin_time, draw_result, rich_mode, adjust_type, profit_threshold,
+                         keep_history)
+
+
+class DaysRunner(object):
+
+    def __init__(self, trader_name, start_timestamp='2019-01-01', days=30) -> None:
+        self.trader_name = trader_name
+
+        records = AccountStats.query_data(filters=[AccountStats.trader_name == self.trader_name],
+                                          order=AccountStats.timestamp.desc(), limit=1, return_type='domain')
+        if records:
+            latest_record: AccountStats = records[0]
+            start_timestamp = latest_record.timestamp
+
+        self.start_timestamp = next_date(to_pd_timestamp(start_timestamp), 1)
+        self.timestamp = start_timestamp
+        self.days = days
+
+    def generate_time_ranges(self):
+        end = min(next_date(self.timestamp, self.days), now_pd_timestamp())
+        yield pd.date_range(start=self.timestamp, end=end, freq='B')
+        self.timestamp = next_date(end, 1)
 
 
 # the __all__ is generated
